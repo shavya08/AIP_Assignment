@@ -1,0 +1,901 @@
+---
+title: "AIP project"
+output: html_document
+date: "2023-11-07"
+editor_options: 
+  chunk_output_type: inline
+---
+
+ 
+# Lead Conversion
+
+World Plus provides a range of banking products, including loans, investment options, savings accounts, and credit products.
+They aim to implement a lead prediction system to pinpoint prospective customers who will buy their new term deposit product. 
+This system will be used to identify the customers to contact through communication channels to sell the new term deposit product.
+
+They have provided a data set of historic customer records (that collected during a similar product offering). 
+
+The details for the dataset is provided below.
+
+Number of Instances: 220000 
+
+Number of Variables: 16
+
+# Data Dictionary:
+
+Attribute     | Description 
+------------- | -------------
+ID | customer identification number
+Gender | gender of the customer
+Age | age of the customer in years
+Dependent | whether the customer has a dependent or not
+Marital_Status | marital state (1=married, 2=single, 0 = others)
+Region_Code | code of the region for the customer
+Years_at_Residence | the duration in the current residence (in years)
+Occupation | occupation type of the customer
+Channel_Code | acquisition channel code used to reach the customer when they opened their bank account 
+Vintage | the number of months that the customer has been associated with the company.
+Credit_Product | if the customer has any active credit product (home loan, personal loan, credit card etc.)
+Avg_Account_Balance | average account balance for the customer in last 12 months
+Account_Type | account type of the customer with categories Silver, Gold and Platinum
+Active | if the customer is active in last 3 months
+Registration | whether the customer has visited the bank for the offered product registration (1 = yes; 0 = no)
+Target | whether the customer has purchased the product, 0: Customer did not purchase the product, 1: Customer purchased the product
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#install.packages("tidyverse")
+#install.packages("dplyr")
+#install.packages("DescTools")
+#install.packages("caret")
+#install.packages("ROSE")
+#install.packages("FSelector")
+#install.packages("Hmisc")
+library(Hmisc)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+
+#one hot encoding
+#install.packages("mltools")
+#install.packages("data.table")
+library(mltools)
+library(data.table)
+
+#Load ROSE package for data balancing
+library(ROSE) 
+
+#For data partitioning
+library(caret)
+```
+
+# Data Cleaning and Exploration
+
+```{r}
+
+#Reading data and save it as mydata
+mydata<- read.csv("assignment_data.csv", stringsAsFactors = T)
+mydata_copy <- mydata
+
+
+#Looking at the structure, we can observe that Gender, Dependent, Marital Status, Region_Code, Occupation, Channel_Code, Credit Product, Account Type, Active, Registration, and Target are all categorical data
+str(mydata)
+
+#Converting the target variable to factor
+mydata$Target <- as.factor(mydata$Target)
+
+#We see that there is -1 in the dependent column, which could be an error
+summary(mydata)
+
+```
+
+# Removing non-required columns & values
+
+```{r}
+
+#Checking for duplicates from mydata
+mydata <- distinct(mydata)
+
+#Removing id column as it serves no purpose from mydata
+mydata$ID <- NULL
+
+#Removing the rows with dependent values as -1 from mydata
+dependent_error <- which(mydata$Dependent == -1)
+mydata <- mydata[-dependent_error,]
+
+#Creating a copy of the dataset for later use and save it as mydata_copy
+mydata_copy<- mydata_copy[-dependent_error,]
+
+```
+
+# Converting Variable to Factors and encoding
+
+```{r}
+
+#We are using label encoding to change the values for `Account Type` in mydata
+mydata$Account_Type <- recode(mydata$Account_Type, "Silver" = 0, "Gold" = 1, "Platinum" = 2 )
+
+#Since, Credit_Product and Active variables have two levels, we can set it to 0 and 1
+mydata$Credit_Product <- ifelse(mydata$Credit_Product == "Yes", 1, 0)
+
+mydata$Active <- ifelse(mydata$Active == "Yes", 1, 0)
+
+#Here, we are simplifying the data levels for Marital_status. We are using 0 for single and 1 for all other values
+mydata$Marital_Status <- ifelse(mydata$Marital_Status == 2, 1, 0)
+
+#We can use one hot encoding for Channel Code, Occupation, and Region code. However, using one hot encoding for Region Code will increase the dimension and may cause the model to overfit
+mydata <- one_hot(as.data.table(mydata), cols = c("Channel_Code", "Occupation","Region_Code" ))
+
+#Checking the summary and structure of the updated `mydata`dataset
+summary(mydata)
+str(mydata)
+
+```
+
+# Dealing with missing values
+
+```{r}
+
+#We noticed there are 18233 missing values in our dataset
+table(is.na(mydata))
+
+#Checking the column contain these
+colnames(mydata)[ apply(mydata, 2, anyNA) ]
+
+#All the missing values arise from Credit_Product, we observe the following data split for yes, no and NA values
+summary(mydata$Credit_Product)
+
+```
+
+## There are 3 approaches when dealing with missing values for modelling purposes, in the next section we are going through those approaches.
+
+1) Remove the na rows from the dataset
+
+```{r}
+
+#Copying the `mydata` into `mydata_no_na` to remove the NA values
+mydata_no_na <- mydata
+
+mydata_no_na <- na.omit(mydata_no_na)
+
+#The minority class decreases substantially when those rows are omitted, which results in loss of information
+prop.table(table(mydata_no_na$Target))
+
+```
+
+2) Replace NA with mode of the missing column values since we have a discrete data
+
+```{r}
+#Copying the `mydata` into `mydata_mode_na` to replace the NA values with the mode
+mydata_mode_na <- mydata
+
+#Replacing no - 0 and yes - 1, and replace missing values with the mode of Credit_Product, which is "No" or 0
+#Converting na's to 0
+mydata_mode_na$Credit_Product[is.na(mydata_mode_na$Credit_Product)] <- 0
+
+#Checking the proporation of missing values
+table(is.na(mydata_mode_na$Credit_Product))
+```
+
+3) Predict the missing values using other variables as predictors
+
+```{r}
+
+#Here, we have to first remove the target variable in this scenario to avoid data leakage
+#Copying the `mydata` into `mydata_mice` and set the Target to NULL
+mydata_mice<- mydata
+mydata_mice$Target <- NULL
+
+#Saving the `mydata_copy_mice` dataset without one hot/label encoding for later use. We are copying from the `mydata_copy`since we have made changes into the original dataset
+mydata_copy_mice<- mydata_copy
+
+#Setting the ID in mydata_copy_mice as NULL
+mydata_copy_mice$ID<-NULL
+
+#Checking the structure of mydata_copy_mice
+str(mydata_copy_mice)
+
+#Converting the Dependent, Marital_Status, Registration into factors
+factorcolumns <- c("Dependent", "Marital_Status","Registration")
+mydata_copy_mice[,factorcolumns] <- lapply(mydata_copy_mice[,factorcolumns], as.factor)
+
+#Setting the Target in mydata_copy_mice as NULL
+mydata_copy_mice$Target <- NULL
+
+#Running mice model using the `mice()` function for data pre-prepossessing to predict the missing values in the Credit_Product variable
+
+#Install and load the mice package
+#install.packages("mice")
+library(mice)
+
+#Performing multiple imputation and saving it as imputed_data
+imputed_data <- mice(mydata_mice, m = 5, method = "logreg", seed = 123)
+
+#Performing the `mice()` on the copied dataset
+imputed_data_copy <- mice(mydata_copy_mice, m = 5, method = "logreg", seed = 123)
+
+#Adding the imputed_data into the `mydata_mice`
+mydata_mice<- complete(imputed_data)
+
+#Making a copy of the dataset `mydata_mice` to run further analysis
+mydata_copy_mice <- complete(imputed_data)
+
+#Checking the Null values in the dataset
+table(is.na(mydata_mice$Credit_Product))
+mydata_mice$Target <- mydata$Target
+
+#Saving the `Target` variable to factors
+mydata_copy_mice$Target <- as.factor(mydata_copy$Target)
+
+```
+
+Now, We have 3 datasets mydata_no_na, mydata_mode_na, mydata_mice. We are going use these datasets to run multiple models.
+
+```{r}
+
+#Dataset with na removed
+mydata_no_na
+#Dataset with na replaced with 0
+mydata_mode_na
+#Dataset with na predicted using the mice function
+mydata_mice
+
+#Copy of mice without label/one hot encoding
+mydata_copy_mice
+
+#Checking the proportion of majority and minority classes:
+#We see that the minority class has decreased substantially in the dataset with na's removed, compared to the other two.
+prop.table(table(mydata_no_na$Target))
+prop.table(table(mydata_mode_na$Target))
+prop.table(table(mydata_mice$Target))
+
+```
+
+# Performing the Data Balancing
+
+```{r}
+
+#We see that the dataset is imbalanced. This would bias in the results of the models
+prop.table(table(mydata$Target))
+
+```
+
+```{r}
+#Here, We are spitting the data test data and training data. 
+
+#Set a seed with 123
+set.seed(123)
+
+#Partition the dataset into training(70%) and test(30%) sets
+#Index keeps the record indices for the training data
+index1 = createDataPartition(mydata_no_na$Target, p = 0.7, list = FALSE)
+index2 = createDataPartition(mydata_mode_na$Target, p = 0.7, list = FALSE)
+index3 = createDataPartition(mydata_mice$Target, p = 0.7, list = FALSE)
+
+#Here, we are creating the testing and training for each of our datasets 
+#Generating training and test data for `mydata_no_na` dataset
+training_no_na = mydata_no_na[index1, ]
+test_no_na = mydata_no_na[-index1, ]
+
+#Generate training and test data for `mydata_mode_na` dataset
+training_mode_na = mydata_mode_na[index2, ]
+test_mode_na = mydata_mode_na[-index2, ]
+
+#Generate training and test data for `mydata_mice` dataset
+training_mice = mydata_mice[index3, ]
+test_mice = mydata_mice[-index3, ]
+
+#Checking if our sampling has given us the same proportion of the target variables in the training and test set for all the datasets
+prop.table(table(training_no_na$Target))
+prop.table(table(test_no_na$Target))
+
+prop.table(table(training_mode_na$Target))
+prop.table(table(test_mode_na$Target))
+
+prop.table(table(training_mice$Target))
+prop.table(table(test_mice$Target))
+
+```
+
+
+```{r}
+#Here, We are over sampling the minority  class and under sampling the majority class to prepare training datasets for all the datasets
+
+#In order to avoid data loss, we have applied both oversampling and undersampling techniques to balance the datasets
+
+#Running the oversampling and undersampling techniques on all the datasets
+bothsampled_no_na <- ovun.sample(Target ~ ., data = training_no_na, method = "both", p=0.5, seed=1)$data
+
+bothsampled_mode_na <- ovun.sample(Target ~ ., data = training_mode_na, method = "both", p=0.5, seed=1)$data
+
+bothsampled_mice <- ovun.sample(Target ~ ., data = training_mice, method = "both", p=0.5, seed=1)$data
+
+#Checking the distribution of `Target` after data balancing
+prop.table(table(bothsampled_no_na$Target))
+prop.table(table(bothsampled_mode_na$Target))
+prop.table(table(bothsampled_mice$Target))
+
+```
+
+# Data exploration and visualization
+
+1) Account balance
+```{r}
+
+#Lets look at our `Target` variable in conjuction with the average account balance
+
+#We see a fairly normal distribution for both types of customers i.e., who are likely to convert and who will not convert, along with right skewness
+
+#Plotting the distribution :- `Target` vs `Average Account Balance`
+ggplot(data = mydata, mapping = aes(x = Avg_Account_Balance, fill = Target, group = Target)) + 
+  geom_histogram(binwidth = 1000, alpha = 0.7, position = "identity")+
+  labs(y = "Frequency", x = "Average Account Balance")+ ggtitle("Account Balance Distribution")+ theme(plot.title = element_text(hjust = 0.5))+ scale_x_continuous(labels = function(x) format(x, scientific = FALSE))
+
+#Since, there are a lot of outliers in the account balance, the median would be an appropriate measure of central tendancy for average account balance
+median(mydata$Avg_Account_Balance)
+
+```
+
+2) Customer Conversion vs Credit Product
+
+```{r}
+#Using the original `mydata_mice` dataset to check `Target` variable, which is customer likelihood to convert versus `Credit Product` variable
+
+ggplot(mydata_mice, 
+      aes(x = Target, group = Credit_Product)) + 
+      geom_bar(aes(y = after_stat(prop), fill = factor(after_stat(x))), 
+                   stat="count", 
+                   alpha = 0.7) +
+      geom_text(aes(label = scales::percent(after_stat(prop)), y = after_stat(prop) ), 
+                   stat= "count", 
+                   vjust = -.1) +
+      labs(y = "Percentage") +
+      facet_grid(~Credit_Product, labeller = labeller(Credit_Product = c("0" = "No", "1" = "Yes"))) +
+      scale_x_discrete(labels = c("No", "Yes"))+
+      scale_fill_manual("Target" ,values = c("navy","magenta"), labels=c("No", "Yes")) + 
+      theme(plot.title = element_text(hjust = 0.5)) + 
+      ggtitle("Do Customers Have the Credit Product?")
+
+
+#Customers with credit product have a higher conversion rate (28%) compared to those who don't have credit product (9%)
+```
+
+
+3) Target variable split per occupation
+
+```{r}
+
+#Creating the visualisation to check the percentage of customers who are likely to convert
+
+barplotdata <- as.data.frame(prop.table(table(Target = mydata_copy$Target, Occupation= mydata_copy$Occupation), margin = 2))
+
+occupation_counts <- as.data.frame(table(Target = mydata_copy$Target, Occupation = mydata_copy$Occupation))
+barplotdata$Occupation_Count <- occupation_counts$Freq
+
+barplotdata
+
+
+ggplot(barplotdata, aes(x = Occupation, y = Freq, fill = Target)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  labs(y = "% of customers")+
+  theme_minimal()+
+  scale_x_discrete(labels = c("Entrepreneur", "Others","Salaried", "Self Employed" ))+
+  ggtitle("Customer Conversion Split Per Occupation")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#We observe that most of the yes cases in the `Target` variable come from the customers who are Entrepreneur. We can anticipate that Entrepreneur are most likely to convert. Hence, further modeling is required to check if our hypothesis is correct.
+
+```
+
+
+# MODELING
+
+# Random Forest
+
+1) Running the Random Forest model on our datasets
+
+```{r}
+
+library(randomForest)
+
+#We will build 3 Random Forest models using 3 of our training datasets
+RF_model_no_na <- randomForest(Target~., bothsampled_no_na, ntree = 500)
+RF_model_mode_na <- randomForest(Target~., bothsampled_mode_na, ntree = 500)
+RF_model_mice <- randomForest(Target~., bothsampled_mice, ntree = 500)
+
+#Checking the important attributes by using `importance()` function
+importance(RF_model_no_na)
+importance(RF_model_mode_na)
+importance(RF_model_mice)
+
+#Plotting the important attributes, according to RF model, registration is the most important predictor for the target variable. This makes more sense as customers who have registered already showcased their interest, which indicates they are likely to convert
+varImpPlot(RF_model_no_na)
+varImpPlot(RF_model_mode_na)
+varImpPlot(RF_model_mice)
+
+```
+
+Let's use the model to predict the outcomes using our test data.
+
+```{r}
+
+#Predicting the class of the test data
+RF_pred_no_na <- predict(RF_model_no_na, test_no_na)
+RF_pred_mode_na <- predict(RF_model_mode_na, test_mode_na)
+RF_pred_mice <- predict(RF_model_mice, test_mice)
+
+#Creating confusion matrix to compare the models
+confusionMatrix(RF_pred_no_na, test_no_na$Target, positive='1', mode = "prec_recall")
+confusionMatrix(RF_pred_mode_na, test_mode_na$Target, positive='1', mode = "prec_recall")
+confusionMatrix(RF_pred_mice, test_mice$Target, positive='1', mode = "prec_recall")
+
+
+#Since, the True Positives are in minority the accuracy will not be a useful metric here. So, we are not using the accuracy. 
+
+#We can conclude from the confusion matrix that - if we predict that a customer is likely to convert, but really they will not convert, i.e. a False Positive, it will cost our company. False negative, on the other hand, leads to missed opportunities. 
+
+#We must therefore look for a metric that accounts for both precision and recall, which is the F1 score. The random forest using the mice dataset has the highest F1 score of 0.5932
+```
+
+# Tuning the random forest
+
+```{r}
+
+#Lets tune our best RF model
+
+#install.packages("randomForestSRC")
+
+#Tuning the RF model
+tuned_rf <- randomForestSRC::tune(Target ~ ., bothsampled_mice,
+  mtryStart = sqrt(ncol(bothsampled_mice)),   
+  nodesizeTry = seq(1, 10, by = 2),  # Adjust the range based on your needs
+  ntree = 500,
+  stepFactor = 1.25, improve = 0.001
+)
+
+#View the results to check the best hyperparameters
+tuned_rf$optimal
+
+```
+
+```{r}
+#Running the RF again
+set.seed(123)
+
+bestRF <-  randomForest(Target~., bothsampled_mice, mtry = 22, nodesize = 1)
+
+RF_tunedpred <- predict(bestRF, test_mice)
+
+confusionMatrix(RF_tunedpred, test_mice$Target, positive='1', mode = "prec_recall")
+
+#We can see that our precision, which was 51.4% before tuning, has increased to 58%. However, the recall has gone down from 70.24% to 63.9%. Our F1 score has improved to 0.60791.
+
+```
+
+# Decision Tree
+
+2) Running the Decision Tree model for our datasets
+
+```{r}
+
+#Use function `information.gain()` to compute information gain (IG)values of the attributes
+weights_no_na <- FSelector::information.gain(Target~., bothsampled_no_na)
+weights_mode_na <- FSelector::information.gain(Target~., bothsampled_mode_na)
+weights_mice <- FSelector::information.gain(Target~., bothsampled_mice)
+
+# Printing the weights
+print(weights_no_na)
+print(weights_mode_na)
+print(weights_mice)
+
+#Plotting the weights in descending order to check the variable with most IG score
+#There is no row name hence we are adding the row names as a column to keep them during ordering
+weights_no_na$attr  <- rownames(weights_no_na)
+weights_mode_na$attr  <- rownames(weights_mode_na)
+weights_mice$attr  <- rownames(weights_mice)
+
+#Sorting the weights in decreasing order of IG values 
+weights_no_na <- arrange(weights_no_na, -attr_importance)
+weights_mode_na <- arrange(weights_mode_na, -attr_importance)
+weights_mice <- arrange(weights_mice, -attr_importance)
+
+#Plotting the weights
+barplot(weights_no_na$attr_importance, names = weights_no_na$attr, las = 2, ylim = c(0, 0.06))
+
+barplot(weights_mode_na$attr_importance, names = weights_mode_na$attr, las = 2, ylim = c(0, 0.06))
+
+barplot(weights_mice$attr_importance, names = weights_mice$attr, las = 2, ylim = c(0, 0.06))
+
+#We see that Registration has the maximum IG value followed by Credit_Product. Additionally, there are some variables with 0 IG. Let's check out all the variable with positive IG.
+
+# filtering the variables where the IG value is positive and saving it as features for all the datasets
+features_no_na <- filter(weights_no_na, attr_importance > 0)$attr
+features_mode_na <- filter(weights_mode_na, attr_importance > 0)$attr
+features_mice <- filter(weights_mice, attr_importance > 0)$attr
+
+#Here, we have selected the subset of the training dataset with variable having a positive IG
+
+#Select a subset of the dataset by using features
+datamodelling_no_na <- bothsampled_no_na[,features_no_na]
+datamodelling_mode_na<- bothsampled_mode_na[,features_mode_na]
+datamodelling_mice<- bothsampled_mice[,features_mice]
+
+#Adding target variable to the filtered dataset for modelling
+datamodelling_no_na$Target <- bothsampled_no_na$Target
+datamodelling_mode_na$Target <- bothsampled_mode_na$Target
+datamodelling_mice$Target <- bothsampled_mice$Target
+
+#Checking the proportions
+prop.table(table(datamodelling_no_na$Target))
+prop.table(table(datamodelling_mode_na$Target))
+prop.table(table(datamodelling_mice$Target))
+
+```
+
+
+# Running the decision tree model
+
+```{r}
+
+#install.packages("C50")
+
+# Load the requied package 
+library(C50)
+
+#Build the decision tree and save it as tree_model for individual datasets
+tree_model_no_na <- C5.0(Target ~., datamodelling_no_na)
+tree_model_mode_na <- C5.0(Target ~., datamodelling_mode_na)
+tree_model_mice <- C5.0(Target ~., datamodelling_mice)
+
+# Check the summary of decision tree model for individual datasets
+summary(tree_model_no_na)
+summary(tree_model_mode_na)
+summary(tree_model_mice)
+
+#Printing the predicting on the test data for individual datasets
+tree_model_no_na_predict = predict(tree_model_no_na, test_no_na)
+print(tree_model_no_na_predict)
+
+tree_model_mode_na_predict = predict(tree_model_mode_na, test_mode_na)
+print(tree_model_mode_na_predict)
+
+tree_model_mice_predict = predict(tree_model_mice, test_mice)
+print(tree_model_mice_predict)
+
+#Compute the confusion matrix to check the performance of the model 
+confusionMatrix(tree_model_no_na_predict, test_no_na$Target, positive='1', mode = "prec_recall")
+confusionMatrix(tree_model_mode_na_predict, test_mode_na$Target, positive='1', mode = "prec_recall")
+confusionMatrix(tree_model_mice_predict, test_mice$Target, positive='1', mode = "prec_recall")
+
+#The 'tree_model_mice' shows the highest F1 score (0.5164) among the three models. The precision scores are very low for each model i.e. below 50%, which means that the majority of positive predictions are False Positives.
+
+```
+
+# SVM model
+
+3) Running Support Vector Machine (SVM) model for our databases
+
+```{r}
+
+#install.packages("e1071")
+library(e1071)
+#for ease of processing, lets use a smaller sample for svm
+set.seed(123)
+
+#Here, we are taking a subset of the original training dataset for ease in running
+index_svm_no_na = createDataPartition(datamodelling_no_na$Target, p = 0.30, list = FALSE)
+index_svm_mode_na = createDataPartition(datamodelling_mode_na$Target, p = 0.30, list = FALSE)
+index_svm_mice = createDataPartition(datamodelling_mice$Target, p = 0.30, list = FALSE)
+
+
+#Generate subset for each datasets
+datamodelling_no_na_subset = datamodelling_no_na[index_svm_no_na, ]
+datamodelling_mode_na_subset = datamodelling_mode_na[index_svm_mode_na, ]
+datamodelling_mice_subset = datamodelling_mice[index_svm_mice, ]
+
+#Building an SVM model by using `svm()` function, we will use the training data set. We have set the kernel to radial 
+svm_model_no_na  <- svm(Target~., data = datamodelling_no_na_subset, kernel = "radial", scale = TRUE, probability = TRUE)
+svm_model_mode_na  <- svm(Target~., data = datamodelling_mode_na_subset, kernel = "radial", scale = TRUE, probability = TRUE)
+svm_model_mice  <- svm(Target~., data = datamodelling_mice_subset, kernel = "radial", scale = TRUE, probability = TRUE)
+
+#Checking the prediction on the test data for each dataset
+svm_model_no_na_predict <- predict(svm_model_no_na, test_no_na)
+svm_model_mode_na_predict <- predict(svm_model_mode_na, test_mode_na)
+svm_model_mice_predict <- predict(svm_model_mice, test_mice)
+
+#Computing the confusion matrix to check the performance of the models
+confusionMatrix(svm_model_no_na_predict, test_no_na$Target, positive='1', mode = "prec_recall")
+confusionMatrix(svm_model_mode_na_predict, test_mode_na$Target, positive='1', mode = "prec_recall")
+confusionMatrix(svm_model_mice_predict, test_mice$Target, positive='1', mode = "prec_recall")
+
+#We can conclude from the confusion matrix that the 'svm_model_mice' has the best F1 score (0.5653), with the best balance of precision and recall metrics.
+```
+
+# Linear Regression
+
+4) Running a Linear Regression model for our datasets
+
+
+```{r}
+
+#We will use `glm()` function in order to build the Logistic Regression model
+#Building a logistic regression model for each dataset
+LogReg_no_na <- glm(Target~. , bothsampled_no_na, family = "binomial")
+LogReg_mode_na <- glm(Target~. , bothsampled_mode_na, family = "binomial")
+LogReg_mice <- glm(Target~. , bothsampled_mice, family = "binomial")
+
+#Creating a summary for each model
+summary(LogReg_no_na)
+summary(LogReg_mode_na)
+summary(LogReg_mice)
+
+#Predicting the class probabilities of the test data for each model
+LogReg_no_na_pred <- predict(LogReg_no_na, test_no_na, type="response")
+LogReg_mode_na_pred <- predict(LogReg_mode_na, test_mode_na, type="response")
+LogReg_mice_pred <- predict(LogReg_mice, test_mice, type="response")
+
+#Predicting the class for each model
+LogReg_no_na_class <- ifelse(LogReg_no_na_pred > 0.5, 1, 0)
+LogReg_mode_na_class <- ifelse(LogReg_mode_na_pred > 0.5, 1, 0)
+LogReg_mice_class <- ifelse(LogReg_mice_pred > 0.5, 1, 0)
+
+#Saving the predictions as factor variables
+LogReg_no_na_class <- as.factor(LogReg_no_na_class)
+LogReg_mode_na_class <- as.factor(LogReg_mode_na_class)
+LogReg_mice_class <- as.factor(LogReg_mice_class)
+
+#Checking the performance of the models
+confusionMatrix(LogReg_no_na_class, test_no_na$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(LogReg_mode_na_class, test_mode_na$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(LogReg_mice_class, test_mice$Target, positive = "1", mode = "prec_recall")
+
+#The `LogReg_mice` model shows the highest F1 score as compared to other models (0.5518). We can conclude that this model predicts the True Positives well and minimizes False Negatives.
+
+```
+
+# Model Evaluation
+
+Precision:
+
+True Positive : TP
+False Positive : FP
+True Negative : TN
+False Negative : FN
+
+Precision measures how accurate the model is when it predicts customers who will purchase the product.
+Relevance: High precision minimizes the cost of reaching out to customers, ensuring those predicted to buy actually do.
+Formula: Precision = TP / (TP + FP)
+
+Recall (Sensitivity):
+
+Recall assesses how well the model identifies all customers who actually purchased the product.
+Relevance: High recall captures as many true positive customers as possible, minimizing the risk of missing potential leads.
+Formula: Recall = TP / (TP + FN)
+
+False Positive Rate (FPR):
+
+FPR calculates how many customers who did not purchase the product are incorrectly predicted as positive.
+Relevance: A low FPR avoids wasting resources on false alarms, targeting customers unlikely to convert.
+Formula: FPR = FP / (TN + FP)
+
+Specificity:
+
+Specificity measures how well the model identifies customers who did not purchase the product.
+Relevance: High specificity ensures resources are focused on promising leads, avoiding wasted efforts.
+Formula: Specificity = TN / (TN + FP)
+
+Since we want a metric that accounts for precision and recall, we can use the F1 score.
+
+In order to evaluate which of our models are the best performers, we can plot the area under the curve for each of the models.
+
+RF
+```{r}
+#Creating ROC chart for Random Forest
+#`RF_model_no_na` dataset
+RF_pred_no_na_prob <- predict(RF_model_no_na,test_no_na, type = "prob")
+
+#`RF_model_mode_na' dataset
+RF_pred_mode_na_prob <- predict(RF_model_mode_na, test_mode_na, type = "prob")
+
+#`RF_model_mice` dataset
+RF_pred_mice_prob <- predict(RF_model_mice, test_mice, type = "prob")
+
+#`RF_model_mice` tuned dataset
+RF_pred_mice_prob_tuned <- predict(bestRF, test_mice, type = "prob")
+
+
+library(pROC) 
+ROC_RF_no_na <- roc(test_no_na$Target, RF_pred_no_na_prob[,2])
+ROC_RF_mode_na <- roc(test_mode_na$Target, RF_pred_mode_na_prob[,2])
+ROC_RF_mice <- roc(test_mice$Target, RF_pred_mice_prob[,2])
+ROC_RF_mice_tuned <- roc(test_mice$Target, RF_pred_mice_prob_tuned[,2])
+
+
+ggroc(list(
+    RF_no_na = ROC_RF_no_na,
+    RF_mode_na = ROC_RF_mode_na,
+    RF_mice = ROC_RF_mice,
+    RF_mice_tuned = ROC_RF_mice_tuned),legacy.axes = TRUE) +
+xlab("FPR") +
+ylab("TPR") +
+geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") +
+ggtitle("ROC Chart of 4 Random Forest Models")
+
+
+auc(ROC_RF_mice)
+auc(ROC_RF_mice_tuned)
+auc(ROC_RF_mode_na)
+auc(ROC_RF_no_na)
+
+#We observe that the 'RF_model_mice' model has the best area under the curve with an area of 0.88. However, 'bestRF'has a similar area under the curve and it has a higher F1 score 0.60791
+```
+
+
+```{r}
+#Creating ROC chart for Decision Trees
+#`tree_model_no_na` dataset
+tree_model_no_na_prob <- predict(tree_model_no_na, test_no_na, type = "prob")
+
+#`tree_model_mode_na' dataset
+tree_model_mode_na_prob <- predict(tree_model_mode_na, test_mode_na, type = "prob")
+
+#`tree_model_mice` dataset
+tree_model_mice_prob <- predict(tree_model_mice, test_mice, type = "prob")
+
+
+library(pROC) 
+ROC_treemodel_no_na<- roc(test_no_na$Target, tree_model_no_na_prob[,2])
+ROC_treemodel_mode_na <- roc(test_mode_na$Target, tree_model_mode_na_prob[,2])
+ROC_treemodel_mice <- roc(test_mice$Target, tree_model_mice_prob[,2])
+
+
+ggroc(list(Tree_model_no_na = ROC_treemodel_no_na, Tree_model_mode_na = ROC_treemodel_mode_na, Tree_model_mice = ROC_treemodel_mice), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")+ ggtitle(label = "ROC Chart of 3 Decision Tree Models")
+
+auc(ROC_treemodel_mice)
+auc(ROC_treemodel_mode_na)
+auc(ROC_treemodel_no_na)
+
+#We observe that the 'tree_model_mice' model has the best area under the curve with an area of 0.84. This model also has the highest F1 score 0.5164. Thus we select this model as the best among the three.
+
+```
+
+
+```{r}
+#Creating ROC chart for SVM
+#`svm_model_no_na` dataset
+svm_model_no_na_predict <- predict(svm_model_no_na, test_no_na, probability = TRUE)
+SVM_no_na_prob <- attr(svm_model_no_na_predict, "probabilities")
+
+#`svm_model_mode_na' dataset
+svm_model_mode_na_predict <- predict(svm_model_mode_na, test_mode_na, probability = TRUE)
+SVM_mode_na_prob <- attr(svm_model_mode_na_predict, "probabilities")
+
+#`svm_model_mice` dataset
+svm_model_mice_predict <- predict(svm_model_mice, test_mice, probability = TRUE)
+SVM_mice_prob <- attr(svm_model_mice_predict, "probabilities")
+
+library(pROC) 
+ROC_SVM_no_na <- roc(test_no_na$Target, SVM_no_na_prob[,2])
+ROC_SVM_mode_na <- roc(test_mode_na$Target, SVM_mode_na_prob[,2])
+ROC_SVM_mice <- roc(test_mice$Target, SVM_mice_prob[,2])
+
+
+ggroc(list(SVM_no_na = ROC_SVM_no_na, SVM_mode_na = ROC_SVM_mode_na, SVM_mice= ROC_SVM_mice), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")+ ggtitle(label = "ROC Chart of 3 SVM Models")
+
+
+auc(ROC_SVM_mice)
+auc(ROC_SVM_mode_na)
+auc(ROC_SVM_no_na)
+
+#We observe that the 'svm_model_no_na' model has the highest area under the curve with an area of 0.87 but it has the lowest F1 score (0.44707). On the other hand, 'svm_model_mice' has the better F1 score, (0.5653) with a similar area under the curve. Thus we select 'svm_model_mice' as the best one, as all svm models have a similar area under the curve.         
+
+```
+
+
+```{r}
+#Creating ROC chart for Logistic Regression
+
+ROC_LogReg_no_na <- roc(test_no_na$Target, LogReg_no_na_pred)
+ROC_LogReg_mode_na <- roc(test_mode_na$Target, LogReg_mode_na_pred)
+ROC_LogReg_mice <- roc(test_mice$Target, LogReg_mice_pred)
+
+
+
+ggroc(list(LogReg_no_na = ROC_LogReg_no_na, LogReg_mode_na = ROC_LogReg_mode_na, LogReg_mice= ROC_LogReg_mice), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")+ ggtitle(label = "ROC Chart of 3 Logistic Regression Models")
+
+auc(ROC_LogReg_mice)
+auc(ROC_LogReg_mode_na)
+auc(ROC_LogReg_no_na)
+
+#We observe that the 'LogReg_no_na' model has the best area under the curve with an area of 0.87. However, the F1 score of this model is significantly lower than 'LogReg_mice' F1 = 0.5518, which also has a similar area under the curve, due to which we select the  'LogReg_mice' model.
+```
+
+
+
+
+
+
+```{r}
+
+#Our ROC and F1 scores tells us that the following models are the best among each model type
+
+#Logistic regression
+auc(ROC_LogReg_mice)
+#Random forest
+auc(ROC_RF_mice_tuned)
+#SVM
+auc(ROC_SVM_mice)
+#Decision tree
+auc(ROC_treemodel_mice)
+
+ggroc(list(LogReg_mice = ROC_LogReg_mice, RF_mice_tuned = ROC_RF_mice_tuned, SVM_mice= ROC_SVM_mice, treemodel_mice = ROC_treemodel_mice), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")+ ggtitle(label = "ROC Chart of the 4 Best Models")
+
+```
+
+Gain table evaluation: This chart will show us the % of correct predictions we can capture per % of data instances (leads) selected.
+```{r}
+
+# let's evaluate the probabilities for the target variable and obtain the gain chart data
+
+library(CustomerScoringMetrics)
+#best model in each model type are:
+
+#For Random forest
+GainTable_RF_mice_tuned <- cumGainsTable(RF_pred_mice_prob_tuned[,2], test_mice$Target, resolution = 1/100)
+
+
+#For SVM
+GainTable_SVM_mice <- cumGainsTable(SVM_mice_prob[,2], test_no_na$Target, resolution = 1/100)
+
+#For tree model
+GainTable_Tree_mice <- cumGainsTable(tree_model_mice_prob[,2], test_mice$Target, resolution = 1/100)
+
+#For Logistic Regression
+GainTable_LogReg_mice <- cumGainsTable(LogReg_mice_pred, test_no_na$Target, resolution = 1/100)
+
+```
+
+# We can now plot the cumulative gains chart
+
+
+````{r}
+
+# Plotting for Random Forest
+plot(GainTable_RF_mice_tuned[, 4], col="green", type="l",    
+     xlab="Percentage of test instances", ylab="Percentage of identified positive customers")
+
+# Adding lines for SVM
+lines(GainTable_SVM_mice[, 4], col="blue", type="l")
+
+# Adding lines for Decision Tree
+lines(GainTable_Tree_mice[, 4], col="purple", type="l")
+
+# Adding lines for Logistic Regression
+lines(GainTable_LogReg_mice[, 4], col="red", type="l")
+
+# Adding a baseline (assuming a random model)
+baseline <- seq(0, 100, length.out = length(GainTable_RF_mice_tuned[, 4]))
+lines(baseline, col="black", type="l", lty=2) 
+grid(NULL, lwd=1)
+
+legend("bottomright",
+       c("Random Forest (MICE)", "SVM (MICE)", "Decision Tree (MICE)", "Logistic Regression (MICE)", "Baseline"),
+       fill=c("green", "blue", "purple", "red", "black"),
+       lty=c(1, 1, 1, 1, 2))
+
+```
+
+
+
+Our final models were chosen to be LogReg_mice, BestRF, SVM_mice, treemodel_mice, based on the best F1 score and area under the curve values
+
+Looking at the gain chart, we can infer the percentage of the positive instances the model predicts per percentage of instances from the dataset. By selecting 20% of the data, we can reach 60% of the customers who will purchase the product. Compared to a scenario where we chose customers randomly without a model, we only get 20% of the positive instances.
+
+We can now obtain the profit per customer using each of the mode, using the model evaluation method, and that involves using the expected value to estimate profit per customer using each model.
+
+
