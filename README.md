@@ -1,4 +1,5 @@
-# AIP_Assignment
+# Churn Prediction using ML
+
 AIP Assignment - Customer Churn Prediction using ML
 Background:
 You are working for an analytics consultancy company. A mid-size private bank, “World Plus”, requested you to deliver a pitch to win a major contract with them to develop and deploy a lead prediction system.
